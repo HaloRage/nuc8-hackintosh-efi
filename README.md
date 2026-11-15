@@ -26,12 +26,9 @@
 | Machine | Intel NUC8 (Bean Canyon) |
 | CPU | Intel Core i3-8109U (2C/4T, 3.0–3.6 GHz) |
 | iGPU | Intel Iris Plus Graphics 655 (`0x3EA5`) |
-| RAM | 16 GB DDR4-2400 (2× 8 GB) |
-| Storage | 512 GB NVMe (macOS) + 1 TB SATA |
 | Audio | Realtek ALC235 (`pci8086,9dc8`) |
 | Ethernet | Intel I219-V |
 | Wi-Fi / BT | Intel Wireless-AC |
-| Display | 2560×1440 @ 120 Hz (DisplayPort) |
 
 > Also expected to work on i5-8259U / i7-8559U Bean Canyon NUCs (same platform/GPU), though this exact EFI was tuned and validated on the i3-8109U.
 
@@ -151,7 +148,7 @@ Both the analog (jack) and DisplayPort audio engines were confirmed streaming (`
 
 ## Known issues
 
-This section exists so the claims above stay honest. Two things were observed on the donor machine and are documented rather than hidden:
+This section exists so the claims above stay honest. A few things were observed on the donor machine and are documented rather than hidden:
 
 **1. One non-reproducing early-boot APFS panic**
 
@@ -166,13 +163,13 @@ roots installed: 0
 - It is **not** the AppleHDA/AppleALC bug above — different kext, different uptime, different mechanism.
 - It did **not** recur: the automatic restart booted cleanly and the machine has run normally since.
 - `diskutil verifyVolume disk1` (whole container) and `diskutil verifyVolume disk1s1` (Data volume) both return **exit code 0** — the filesystem is clean.
-- NVMe SMART is **Verified**; 160 GB free of 238 GB; no APFS mount errors in the logs.
+- NVMe SMART is **Verified**; no APFS mount errors in the logs.
 
-The likely cause is **marginal hardware, not the EFI**: the donor machine runs **two mismatched SO-DIMMs** (SK Hynix `HMA81GS6JJR8N-VK` + Samsung `M471A1G44AB0-CWE`) with ECC disabled. Mixed DIMMs are a common source of sporadic early-boot memory-corruption panics. If you see this signature, test your RAM before blaming the config. A rare race in APFS's parallel early volume mounts is the secondary suspect.
+The likely cause is **marginal hardware, not the EFI**: the donor machine runs **two mismatched SO-DIMMs from different vendors** with ECC disabled. Mixed DIMMs are a common source of sporadic early-boot memory-corruption panics. If you see this signature, test your RAM before blaming the config. A rare race in APFS's parallel early volume mounts is the secondary suspect.
 
 **2. Boot-time TRIM is intentionally disabled**
 
-`Kernel → Quirks → SetApfsTrimTimeout` is set to **`0`**, which on macOS 12+ **disables TRIM at boot**. This is deliberate: it avoids the long boot-time TRIM stall that cheap DRAM-less NVMe drives (like the TwinMOS unit in the donor machine) exhibit. macOS still reports "TRIM Support: Yes" in System Information, but boot-time trimming is off. If you have a good NVMe drive and want trimming back, set it to `-1`.
+`Kernel → Quirks → SetApfsTrimTimeout` is set to **`0`**, which on macOS 12+ **disables TRIM at boot**. This is deliberate: it avoids the long boot-time TRIM stall that cheap DRAM-less NVMe drives exhibit. macOS still reports "TRIM Support: Yes" in System Information, but boot-time trimming is off. If you have a good NVMe drive and want trimming back, set it to `-1`.
 
 **3. Long shutdowns on some systems**
 
