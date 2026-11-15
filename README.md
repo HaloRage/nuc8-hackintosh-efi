@@ -2,7 +2,7 @@
 
 ![Intel NUC8](docs/images/nuc8.jpg)
 
-**The definitive EFI for the Intel NUC8.** Fully optimized, panic-free, and running **every core feature** — graphics, 120 Hz display, onboard audio, HDMI/DisplayPort audio, Ethernet, Wi-Fi, Bluetooth, USB, NVMe and sleep. This is not a "boots and mostly works" config: it is a daily-driver EFI that has been stress-validated across repeated cold boots with **zero kernel panics**.
+**The definitive EFI for the Intel NUC8.** Fully optimized, daily-driver stable, and running **every core feature** — graphics, 120 Hz display, onboard audio, HDMI/DisplayPort audio, Ethernet, Wi-Fi, Bluetooth, USB, NVMe and sleep. This is not a "boots and mostly works" config: it is a daily-driver EFI validated across repeated cold boots, with every known panic traced to a root cause and fixed. Anything still unexplained is documented in [Known issues](#known-issues) rather than swept under the rug.
 
 > **macOS Sequoia 15.7.2 (24G325) · OpenCore 1.0.7 · SMBIOS Macmini8,1**
 
@@ -10,7 +10,7 @@
 
 ## Why this EFI?
 
-- ✅ **Zero boot panics.** Fixes the notorious AppleHDA `DspFuncLib` use-after-free / AppleALC page-fault panic that plagues NUC8 builds — *without* sacrificing HDMI/DP audio.
+- ✅ **Fixes the notorious NUC8 boot panic.** Eliminates the AppleHDA `DspFuncLib` use-after-free / AppleALC page-fault panic that plagues NUC8 builds — *without* sacrificing HDMI/DP audio. Six consecutive panic reports on the donor machine were all traced to this one bug; after the fix, boots are clean. See [Known issues](#known-issues) for the one unrelated, non-reproducing event observed afterwards.
 - ✅ **Both audio paths work at the same time:** onboard Realtek ALC235 (3.5 mm jack) **and** HDMI/DisplayPort monitor audio, selectable and hot-switchable.
 - ✅ **Full graphics acceleration** — Intel Iris Plus Graphics 655, QE/CI, Metal, 1536 MB VRAM, **2560×1440 @ 120 Hz**.
 - ✅ **Native-feeling networking** — Intel Ethernet + Intel Wi-Fi (AirportItlwm) + Bluetooth.
@@ -26,7 +26,7 @@
 | Machine | Intel NUC8 (Bean Canyon) |
 | CPU | Intel Core i3-8109U (2C/4T, 3.0–3.6 GHz) |
 | iGPU | Intel Iris Plus Graphics 655 (`0x3EA5`) |
-| RAM | 12 GB DDR4-2400 |
+| RAM | 16 GB DDR4-2400 (2× 8 GB) |
 | Storage | 512 GB NVMe (macOS) + 1 TB SATA |
 | Audio | Realtek ALC235 (`pci8086,9dc8`) |
 | Ethernet | Intel I219-V |
@@ -49,7 +49,7 @@
 | Wi-Fi | ✅ | AirportItlwm 2.4.0 |
 | Bluetooth | ✅ | IntelBluetoothFirmware + BlueToolFixup + IntelBTPatcher |
 | USB (all ports, mapped) | ✅ | USBToolBox + UTBMap |
-| NVMe + TRIM | ✅ | NVMeFix |
+| NVMe | ✅ | NVMeFix; boot-time TRIM disabled (`SetApfsTrimTimeout = 0`) |
 | Sleep / wake | ✅ | |
 | App Store / iCloud / iMessage | ⚠️ | **Requires your own SMBIOS** — see below |
 | AirDrop / Continuity | ⚠️ | Depends on Wi-Fi card; Intel cards are limited |
@@ -146,6 +146,37 @@ This EFI was tested across **4 consecutive cold boots**:
 | 4 | 0 new | ✅ / ✅ | active | present | DisplayPort |
 
 Both the analog (jack) and DisplayPort audio engines were confirmed streaming (`IOAudioEngineState = 1`) with real playback.
+
+---
+
+## Known issues
+
+This section exists so the claims above stay honest. Two things were observed on the donor machine and are documented rather than hidden:
+
+**1. One non-reproducing early-boot APFS panic**
+
+On the first cold boot after ~9 hours powered off, the machine panicked once at **1.35 s uptime**, before userspace started:
+
+```
+panic(cpu 2 caller ...): [kalloc.type.var4.16]: element modified after free
+Kernel Extensions in backtrace: com.apple.filesystems.apfs
+roots installed: 0
+```
+
+- It is **not** the AppleHDA/AppleALC bug above — different kext, different uptime, different mechanism.
+- It did **not** recur: the automatic restart booted cleanly and the machine has run normally since.
+- `diskutil verifyVolume disk1` (whole container) and `diskutil verifyVolume disk1s1` (Data volume) both return **exit code 0** — the filesystem is clean.
+- NVMe SMART is **Verified**; 160 GB free of 238 GB; no APFS mount errors in the logs.
+
+The likely cause is **marginal hardware, not the EFI**: the donor machine runs **two mismatched SO-DIMMs** (SK Hynix `HMA81GS6JJR8N-VK` + Samsung `M471A1G44AB0-CWE`) with ECC disabled. Mixed DIMMs are a common source of sporadic early-boot memory-corruption panics. If you see this signature, test your RAM before blaming the config. A rare race in APFS's parallel early volume mounts is the secondary suspect.
+
+**2. Boot-time TRIM is intentionally disabled**
+
+`Kernel → Quirks → SetApfsTrimTimeout` is set to **`0`**, which on macOS 12+ **disables TRIM at boot**. This is deliberate: it avoids the long boot-time TRIM stall that cheap DRAM-less NVMe drives (like the TwinMOS unit in the donor machine) exhibit. macOS still reports "TRIM Support: Yes" in System Information, but boot-time trimming is off. If you have a good NVMe drive and want trimming back, set it to `-1`.
+
+**3. Long shutdowns on some systems**
+
+Every shutdown on the donor machine writes a `shutdown_stall` report. Decoding it shows **`CloudTelemetryService`** (`privatecloudcomputed`) hanging, which is a macOS/iCloud telemetry behaviour and is unrelated to this EFI.
 
 ---
 
