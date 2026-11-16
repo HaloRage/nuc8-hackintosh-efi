@@ -2,7 +2,7 @@
 
 ![Intel NUC8](docs/images/nuc8.jpg)
 
-**The definitive EFI for the Intel NUC8.** Fully optimized, daily-driver stable, and running **every core feature** — graphics, 120 Hz display, onboard audio, HDMI/DisplayPort audio, Ethernet, Wi-Fi, Bluetooth, USB, NVMe and sleep. This is not a "boots and mostly works" config: it is a daily-driver EFI validated across repeated cold boots, with the panics it still produces traced as far as the logs allow. Anything still open is documented in [Known issues](#known-issues) rather than swept under the rug.
+**The definitive EFI for the Intel NUC8.** Fully optimized, daily-driver stable, and running **every core feature** — graphics, 120 Hz display, onboard audio, Ethernet, Wi-Fi, Bluetooth, USB, NVMe and sleep. Monitor audio is deliberately switched off, because that is what stops the boot panic (see [Known issues](#known-issues)). Anything still open is documented there rather than swept under the rug.
 
 > **macOS Sequoia 15.7.2 (24G325) · OpenCore 1.0.7 · SMBIOS Macmini8,1**
 
@@ -10,12 +10,12 @@
 
 ## Why this EFI?
 
-- ⚠️ **Fixes the common NUC8 boot panic — but not every variant.** Eliminates the AppleHDA `DspFuncLib` use-after-free / AppleALC page-fault panic caused by `no-controller-inject`, *without* sacrificing HDMI/DP audio. A rarer AppleHDA HDMI/DP teardown panic can still fire while `coreaudiod` enumerates devices at boot. See [Known issues](#known-issues).
-- ✅ **Both audio paths work at the same time:** onboard Realtek ALC235 (3.5 mm jack) **and** HDMI/DisplayPort monitor audio, selectable and hot-switchable.
+- ✅ **Fixes the NUC8 boot panic.** The AppleHDA `DspFuncLib` use-after-free / AppleALC page-fault panic that plagues NUC8 builds had two triggers: `no-controller-inject` on the iGPU, and the HDMI/DP audio engine tearing itself down while `coreaudiod` enumerated devices at boot. Both are removed here — the first by correcting the injection, the second by disabling monitor audio with `No-hda-gfx`. All ten panic reports from the donor machine belonged to this family.
+- ✅ **Stable onboard audio:** Realtek ALC235 (3.5 mm jack) via AppleALC, layout-id 8. HDMI/DisplayPort audio is intentionally **off** — [Known issues](#known-issues) has the re-enable steps.
 - ✅ **Full graphics acceleration** — Intel Iris Plus Graphics 655, QE/CI, Metal, 1536 MB VRAM, **2560×1440 @ 120 Hz**.
 - ✅ **Native-feeling networking** — Intel Ethernet + Intel Wi-Fi (AirportItlwm) + Bluetooth.
 - ✅ **Clean, minimal, documented config** — every patch has a reason. No mystery kexts, no "shotgun" fixes.
-- ✅ **Validated over 4/4 consecutive cold boots** with HDMI audio enumerating every time (see [Validation](#validation)) — a sample, not a guarantee.
+- ✅ **Validated across repeated cold boots** — see [Validation](#validation).
 
 ---
 
@@ -41,7 +41,7 @@
 | Graphics acceleration (QE/CI, Metal) | ✅ | Iris Plus 655, 1536 MB |
 | 2560×1440 @ 120 Hz | ✅ | DisplayPort |
 | Onboard audio (3.5 mm jack) | ✅ | AppleALC, layout-id 8 |
-| HDMI / DisplayPort audio | ✅ | `hda-gfx=onboard-1` on IGPU + HDEF |
+| HDMI / DisplayPort audio | ❌ | **Off by design** (`No-hda-gfx`) — this is what stops the boot panic; re-enable steps in [Known issues](#known-issues) |
 | Ethernet | ✅ | IntelMausi |
 | Wi-Fi | ✅ | AirportItlwm 2.4.0 |
 | Bluetooth | ✅ | IntelBluetoothFirmware + BlueToolFixup + IntelBTPatcher |
@@ -62,20 +62,24 @@ panic: AppleHDA ... DspFuncLib ... use-after-free
 panic: AppleALC ... CR2: 0x10 ... AlcEnabler::init()
 ```
 
-**Root cause:** `no-controller-inject` was present on the iGPU device properties. That makes AppleALC's `validateInjection()` fail, so it never sets `hda-gfx` on the iGPU and never registers the HDMI/DP controller. `AppleHDAHDMI_DPDriver::initHardware` then cannot link to the framebuffer, and its teardown frees shared `DspFuncLib` objects out from under the live driver → use-after-free panic.
+There were two independent triggers:
 
-**The fix (applied in this EFI):**
+1. **`no-controller-inject` on the iGPU.** It makes AppleALC's `validateInjection()` fail, so it never sets `hda-gfx` on the iGPU and never registers the HDMI/DP controller. `AppleHDAHDMI_DPDriver::initHardware` then cannot link to the framebuffer, and its teardown frees shared `DspFuncLib` objects out from under the live driver → use-after-free.
+2. **The HDMI/DP audio engine itself.** Even with correct injection, AppleHDA's DP engine can still be torn down while `coreaudiod` enumerates devices ~10–12 s into boot, writing into a freed 16-byte `kalloc` element. Every AppleHDA panic in the reports fired in exactly that window.
+
+**The fix applied in this EFI:**
 
 1. **Remove** `no-controller-inject` from `PciRoot(0x0)/Pci(0x2,0x0)` (IGPU).
-2. **Add** `hda-gfx = onboard-1` to the IGPU.
-3. **Add** `hda-gfx = onboard-1` to `PciRoot(0x0)/Pci(0x1F,0x3)` (HDEF).
+2. **Remove** `hda-gfx` from the IGPU.
+3. **Remove** `hda-gfx` from `PciRoot(0x0)/Pci(0x1F,0x3)` (HDEF).
+4. **Add** `No-hda-gfx` (8 zero bytes) to HDEF, keeping `layout-id = 8` for the analog codec.
 
-That's it. HDMI/DP audio initializes correctly and the `no-controller-inject` panic class is gone — **no `No-hda-gfx` workaround, no disabled audio.** A separate, much rarer teardown panic can still occur at boot; see [Known issues](#known-issues).
+That disables the DP/HDMI audio path, so neither teardown can run. The 3.5 mm jack is unaffected, and video over HDMI/DP is unaffected — this is audio only.
 
 <details>
-<summary>Fallback if you ever need it</summary>
+<summary>Turning monitor audio back on (accepts the panic risk)</summary>
 
-If you hit the remaining boot panic and don't need monitor audio, set `No-hda-gfx` on HDEF and remove `hda-gfx` from both devices. This guarantees stability at the cost of HDMI/DP audio. Upstream's only fix for the HDMI/DP variant is the same trade-off.
+Remove `No-hda-gfx` from HDEF and add `hda-gfx = onboard-1` to both the IGPU and HDEF. HDMI/DP audio comes back, and so does the chance of a panic on the first cold boot after the machine has been off for hours. Upstream has no better fix — see [bugtracker #1551](https://github.com/acidanthera/bugtracker/issues/1551).
 </details>
 
 ---
@@ -88,7 +92,7 @@ If you hit the remaining boot panic and don't need monitor audio, set `No-hda-gf
 | VirtualSMC | 1.3.8 | SMC emulation |
 | SMCProcessor | 1.3.8 | CPU sensors |
 | SMCSuperIO | 1.3.8 | Fan/IO sensors |
-| AppleALC | 1.9.8 | Audio (ALC235 + HDMI/DP) |
+| AppleALC | 1.9.8 | Audio (ALC235 analog) |
 | WhateverGreen | 1.7.1 | Graphics / framebuffer |
 | AirportItlwm | 2.4.0 | Intel Wi-Fi |
 | IntelBluetoothFirmware | 2.5.0 | Intel Bluetooth |
@@ -133,7 +137,7 @@ If you hit the remaining boot panic and don't need monitor audio, set `No-hda-gf
 
 ## Validation
 
-This EFI was tested across **4 consecutive cold boots**:
+**2026-11-14 — audio fix, monitor audio still enabled** (4 consecutive cold boots):
 
 | Boot | Kernel panics | `hda-gfx` IGPU/HDEF | HDMI/DP driver | DP audio engine | Default output |
 |---|---|---|---|---|---|
@@ -142,7 +146,9 @@ This EFI was tested across **4 consecutive cold boots**:
 | 3 | 0 new | ✅ / ✅ | active | present | DisplayPort |
 | 4 | 0 new | ✅ / ✅ | active | present | DisplayPort |
 
-Both the analog (jack) and DisplayPort audio engines were confirmed streaming (`IOAudioEngineState = 1`) with real playback.
+Both the analog (jack) and DisplayPort audio engines were confirmed streaming (`IOAudioEngineState = 1`) with real playback. That config still panicked intermittently later (see [Known issues](#known-issues)).
+
+**2026-11-16 — monitor audio disabled.** `No-hda-gfx` on HDEF, `hda-gfx` removed from both devices. This is the configuration shipped here; the DP audio columns above describe the previous, HDMI-enabled config.
 
 ---
 
@@ -150,26 +156,28 @@ Both the analog (jack) and DisplayPort audio engines were confirmed streaming (`
 
 This section exists so the claims above stay honest. A few things were observed on the donor machine and are documented rather than hidden:
 
-**1. Intermittent early-boot `kalloc` panic — the one real open issue**
+**1. Monitor audio is disabled — deliberately**
 
-This EFI is not 100 % panic-free. Ten panic reports were collected on the donor machine over a week of daily use, and all of them belong to the same `kalloc … element modified after free` family:
+`No-hda-gfx` is set on HDEF and `hda-gfx` is removed from both devices, so HDMI/DisplayPort audio is not available as an output. The 3.5 mm jack is unaffected.
 
-| Where it surfaces | Uptime | Count |
+Why it is off: ten panic reports collected on the donor machine over a week of daily use all belonged to the same `kalloc … element modified after free` family:
+
+| Where it surfaced | Uptime | Count |
 |---|---|---|
 | `AppleHDA` / `DspFuncLib` | 9.6–12.3 s | 8 |
 | `apfs` | 1.35 s | 1 |
 | `logd` | 4.6 s | 1 |
 
-- The AppleHDA ones fire while `coreaudiod` enumerates the audio devices at boot. That is a known upstream AppleALC/AppleHDA HDMI/DP bug ([bugtracker #1551](https://github.com/acidanthera/bugtracker/issues/1551), [#1283](https://github.com/acidanthera/bugtracker/issues/1283)).
-- It can fire twice in a row (01:18 and 01:20 on the same night), so a machine may need two or three boot attempts.
-- It only shows up on the **first boot after the machine has been powered off for hours**; warm reboots have been clean.
-- The `apfs` and `logd` variants have no audio kext in the backtrace — most likely the same stale write landing in whichever 16-byte allocation is used next.
+- The AppleHDA ones fired while `coreaudiod` enumerated devices at boot — a known upstream AppleALC/AppleHDA HDMI/DP bug ([bugtracker #1551](https://github.com/acidanthera/bugtracker/issues/1551), [#1283](https://github.com/acidanthera/bugtracker/issues/1283)).
+- They could hit twice in a row (01:18 and 01:20 the same night), needing two or three power-ons.
+- They only appeared on the **first boot after the machine had been off for hours**; warm reboots were clean.
+- The `apfs` and `logd` variants had no audio kext in the backtrace — most likely the same stale 16-byte allocation being reused.
 
-The filesystem is not the cause: `diskutil verifyVolume disk1` and `diskutil verifyVolume disk1s1` both return **exit 0**, NVMe SMART is **Verified**, and there are no APFS mount errors in the logs.
+Upstream's only reliable fix for the HDMI/DP variant is to disable that audio path, so that is what this EFI does. Turning it back on is a two-minute edit (see [The panic fix](#the-panic-fix)) but restores the panic risk.
 
-**If you need absolute stability**, set `No-hda-gfx` on HDEF and remove `hda-gfx` from both devices. That is upstream's only fix for the HDMI/DP variant, and it costs you monitor audio — the 3.5 mm jack keeps working. This EFI deliberately keeps both audio paths and accepts the occasional boot panic.
+The filesystem is not involved: `diskutil verifyVolume disk1` and `diskutil verifyVolume disk1s1` both return **exit 0**, NVMe SMART is **Verified**, and there are no APFS mount errors in the logs.
 
-If you see this signature repeatedly, run a memory test before blaming the config: sporadic early-boot zone corruption is a classic symptom of marginal RAM.
+If you still see `kalloc … element modified after free` with monitor audio off, run a memory test before blaming the config — sporadic early-boot zone corruption is a classic symptom of marginal RAM.
 
 **2. Boot-time TRIM is intentionally disabled**
 
@@ -183,8 +191,8 @@ Every shutdown on the donor machine writes a `shutdown_stall` report. Decoding i
 
 ## Troubleshooting
 
-- **No HDMI/DP audio:** confirm `hda-gfx=onboard-1` exists on both IGPU and HDEF, and that `no-controller-inject` is **absent** from IGPU.
-- **Boot panic in AppleHDA/AppleALC:** make sure `no-controller-inject` is **absent** from IGPU (that is the fix above). If you still hit it and don't use monitor audio, add `No-hda-gfx` to HDEF — see [Known issues](#known-issues).
+- **No HDMI/DP audio:** expected — this EFI disables it on purpose. See [Known issues](#known-issues) if you want it back.
+- **Boot panic in AppleHDA/AppleALC:** `no-controller-inject` is back on the IGPU, or `No-hda-gfx` was removed. See [The panic fix](#the-panic-fix).
 - **iServices not working:** generate your own SMBIOS; the placeholders here are intentionally fake.
 - **Wi-Fi not connecting:** ensure AirportItlwm matches your macOS version (2.4.0 = Sequoia).
 - **Picker not showing:** hold Alt/Esc/0 during boot.
